@@ -1,6 +1,7 @@
 use axum::extract::State;
 use axum::{extract::Path, routing::get, Router};
 use base64::{engine::general_purpose, Engine as _};
+use chrono::Utc;
 use crc_any::CRCu16;
 use serialport;
 use std::collections::VecDeque;
@@ -165,7 +166,7 @@ fn serial_task(sender: Sender<Vec<u8>>, receiver: Receiver<Vec<u8>>) -> ! {
 
                 if content_string.chars().last() == Some('\n') {
                     content_string.pop();
-                    println!("{}", content_string);
+                    println!("[{}] {}", Utc::now(), content_string);
                     let _ = sender.send(content_string.as_bytes().to_vec());
                     content_string.clear();
                 }
