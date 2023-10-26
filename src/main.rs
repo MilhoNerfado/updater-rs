@@ -10,11 +10,11 @@ use std::net::SocketAddr;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::sleep;
 use std::time::Duration;
-use std::{fs, io};
+use std::{clone, cmp, fs, io};
 
 const SERIAL_PORT: &str = "/dev/ttyUSB0";
 const BAUD_RATE: u32 = 115_200;
-
+const UART_MAT_SIZE: usize = 120;
 const MAX_SIZE: usize = 256;
 
 #[tokio::main]
@@ -94,9 +94,9 @@ async fn iot_update(Path(path): Path<String>, State(tx): State<Sender<Vec<u8>>>)
                     return "Failed to send to tx";
                 };
 
-                return "Returned";
+                // return "Returned";
 
-                sleep(Duration::from_millis(1_000));
+                sleep(Duration::from_millis(600));
             }
             None => break,
         }
@@ -140,22 +140,6 @@ fn serial_task(sender: Sender<Vec<u8>>, receiver: Receiver<Vec<u8>>) -> ! {
     let mut content_string = String::new();
 
     loop {
-        if let Ok(write_content) = receiver.try_recv() {
-            match port.write(write_content.as_slice()) {
-                Ok(_) => {
-                    println!(
-                        "!! SIM !!  Wrote Something <{:?}>",
-                        String::from_utf8(write_content)
-                    );
-                }
-                Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
-                    port = serial_connect(SERIAL_PORT, BAUD_RATE);
-                    println!("Connected to serial");
-                }
-                Err(_) => {}
-            };
-        }
-
         match port.read_exact(&mut read_buffer) {
             Ok(_) => {
                 content_string.push(read_buffer[0] as char);
@@ -166,7 +150,7 @@ fn serial_task(sender: Sender<Vec<u8>>, receiver: Receiver<Vec<u8>>) -> ! {
 
                 if content_string.chars().last() == Some('\n') {
                     content_string.pop();
-                    println!("[{}] {}", Utc::now(), content_string);
+                    println!("{}", content_string);
                     let _ = sender.send(content_string.as_bytes().to_vec());
                     content_string.clear();
                 }
@@ -178,6 +162,30 @@ fn serial_task(sender: Sender<Vec<u8>>, receiver: Receiver<Vec<u8>>) -> ! {
                 println!("Connected to serial");
             }
             Err(_) => {}
+        }
+
+        if let Ok(mut write_content) = receiver.try_recv() {
+            while !write_content.is_empty() {
+                let to_write: Vec<u8> = write_content
+                    .drain(0..std::cmp::min(write_content.len(), UART_MAT_SIZE))
+                    .collect();
+
+                match port.write(to_write.as_slice()) {
+                    Ok(_) => {
+                        println!(
+                            "!! SIM !!  Wrote Something <{:?}>",
+                            String::from_utf8(to_write)
+                        );
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                        port = serial_connect(SERIAL_PORT, BAUD_RATE);
+                        println!("Connected to serial");
+                    }
+                    Err(_) => {}
+                };
+
+                sleep(Duration::from_millis(600));
+            }
         }
     }
 }
