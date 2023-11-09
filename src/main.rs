@@ -8,13 +8,13 @@ use std::collections::VecDeque;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::thread::sleep;
 use std::time::Duration;
-use std::{clone, cmp, fs, io};
+use std::{fs, io};
+use tokio::time::sleep;
 
 const SERIAL_PORT: &str = "/dev/ttyUSB0";
 const BAUD_RATE: u32 = 115_200;
-const UART_MAT_SIZE: usize = 120;
+const UART_MAT_SIZE: usize = 110;
 const MAX_SIZE: usize = 256;
 
 #[tokio::main]
@@ -40,7 +40,7 @@ async fn main() -> ! {
     println!("All OK!");
 
     loop {
-        sleep(Duration::from_millis(100));
+        sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -65,17 +65,19 @@ async fn iot_update(Path(path): Path<String>, State(tx): State<Sender<Vec<u8>>>)
     loop {
         match file.read(&mut buffer) {
             Ok(0) => break,
+
             Ok(bytes_read) => {
                 let b64_encoded = general_purpose::STANDARD.encode(&buffer[..bytes_read]);
                 encoded_data.push_back(b64_encoded);
             }
+
             Err(_) => return "Failed to read/encode",
         }
     }
 
-    sleep(Duration::from_millis(1_000));
+    sleep(Duration::from_millis(1_000)).await;
 
-    loop {
+    for i in 0..encoded_data.len() - 1 {
         match encoded_data.pop_front() {
             Some(data) => {
                 let mut crc = CRCu16::crc16xmodem();
@@ -85,8 +87,11 @@ async fn iot_update(Path(path): Path<String>, State(tx): State<Sender<Vec<u8>>>)
                 let Ok(crc) = u64::from_str_radix(crc, 16) else {
                     return "Failed to parse hex crc number";
                 };
-                let msg =
-                    format!("[\"123\",{{\"k\":13,\"v\":[0,{crc},\"{data}\"]}}]\r\n").into_bytes();
+
+                let offset = i * MAX_SIZE;
+
+                let msg = format!("[\"123\",{{\"k\":13,\"v\":[{offset},{crc},\"{data}\"]}}]\r\n")
+                    .into_bytes();
 
                 println!("{}", msg.len());
 
@@ -94,9 +99,7 @@ async fn iot_update(Path(path): Path<String>, State(tx): State<Sender<Vec<u8>>>)
                     return "Failed to send to tx";
                 };
 
-                // return "Returned";
-
-                sleep(Duration::from_millis(600));
+                sleep(Duration::from_millis(600)).await;
             }
             None => break,
         }
@@ -104,9 +107,59 @@ async fn iot_update(Path(path): Path<String>, State(tx): State<Sender<Vec<u8>>>)
 
     "Updated IOT"
 }
-async fn mke_update(Path(path): Path<String>) -> &'static str {
-    let Ok((_, _)) = get_file(&path) else {
+async fn mke_update(Path(path): Path<String>, State(tx): State<Sender<Vec<u8>>>) -> &'static str {
+    let Ok((mut file, file_len)) = get_file(&path) else {
         return "Failed to open file";
+    };
+
+    let mut buffer = [0; MAX_SIZE];
+    let mut encoded_data: VecDeque<String> = VecDeque::new();
+
+    let mut file_crc = CRCu16::crc16xmodem();
+
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(bytes_read) => {
+                file_crc.digest(&buffer);
+                let b64_encoded = general_purpose::STANDARD.encode(&buffer[..bytes_read]);
+                encoded_data.push_back(b64_encoded);
+            }
+            Err(_) => return "Failed to read/encode",
+        }
+    }
+
+    for i in 0..encoded_data.len() - 1 {
+        match encoded_data.pop_front() {
+            Some(data) => {
+                let mut crc = CRCu16::crc16xmodem();
+                crc.digest(&data);
+                let crc = crc.to_string();
+                let crc = crc.trim_start_matches("0x");
+                let Ok(crc) = u64::from_str_radix(crc, 16) else {
+                    return "Failed to parse hex crc number";
+                };
+                let offset = i * MAX_SIZE;
+
+                let msg = format!("[\"123\",{{\"k\":12,\"v\":[{offset},{crc},\"{data}\"]}}]\n")
+                    .into_bytes();
+
+                println!("msg len: {}", msg.len());
+
+                let Ok(_) = tx.send(msg) else {
+                    return "Failed to send to tx";
+                };
+
+                sleep(Duration::from_millis(500)).await;
+            }
+            None => {}
+        };
+    }
+
+    let msg = format!("[\"1234\",{{\"k\":11,\"v\":[true,{file_len},{file_crc}]}}]").into_bytes();
+
+    let Ok(_) = tx.send(msg) else {
+        return "Failed o sendo to tx";
     };
 
     "Updated MKE"
@@ -126,7 +179,7 @@ fn serial_connect(serial_port: &str, baud_rate: u32) -> Box<dyn serialport::Seri
             .timeout(Duration::from_millis(10))
             .open()
         else {
-            sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(500));
             continue;
         };
 
@@ -150,7 +203,7 @@ fn serial_task(sender: Sender<Vec<u8>>, receiver: Receiver<Vec<u8>>) -> ! {
 
                 if content_string.chars().last() == Some('\n') {
                     content_string.pop();
-                    println!("{}", content_string);
+                    println!("[{}] {}", Utc::now(), content_string);
                     let _ = sender.send(content_string.as_bytes().to_vec());
                     content_string.clear();
                 }
@@ -173,7 +226,8 @@ fn serial_task(sender: Sender<Vec<u8>>, receiver: Receiver<Vec<u8>>) -> ! {
                 match port.write(to_write.as_slice()) {
                     Ok(_) => {
                         println!(
-                            "!! SIM !!  Wrote Something <{:?}>",
+                            "[{}] !! SIM !!  Wrote Something <{:?}>",
+                            Utc::now(),
                             String::from_utf8(to_write)
                         );
                     }
@@ -184,7 +238,7 @@ fn serial_task(sender: Sender<Vec<u8>>, receiver: Receiver<Vec<u8>>) -> ! {
                     Err(_) => {}
                 };
 
-                sleep(Duration::from_millis(600));
+                std::thread::sleep(Duration::from_millis(100));
             }
         }
     }
