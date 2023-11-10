@@ -14,8 +14,8 @@ use tokio::time::sleep;
 
 const SERIAL_PORT: &str = "/dev/ttyUSB0";
 const BAUD_RATE: u32 = 115_200;
-const UART_MAT_SIZE: usize = 110;
-const MAX_SIZE: usize = 256;
+const UART_MAT_SIZE: usize = 100;
+const MAX_SIZE: usize = 160;
 
 #[tokio::main]
 async fn main() -> ! {
@@ -28,6 +28,7 @@ async fn main() -> ! {
         .route("/", get(root))
         .route("/iot/:path", get(iot_update))
         .route("/mke/:path", get(mke_update))
+        .route("/test", get(test_msg))
         .with_state(ser_tx);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
@@ -48,12 +49,32 @@ async fn root() -> &'static str {
     "Hello world!"
 }
 
+async fn test_msg(State(tx): State<Sender<Vec<u8>>>) -> &'static str {
+    let data = general_purpose::STANDARD.encode("dataInTesting");
+
+    let mut crc = CRCu16::crc16xmodem();
+    crc.digest(&data);
+    let crc = crc.to_string();
+    let crc = crc.trim_start_matches("0x");
+    let Ok(crc) = u64::from_str_radix(crc, 16) else {
+        return "Failed to parse hex crc number";
+    };
+
+    let msg = format!("[\"123\",{{\"k\":12,\"v\":[0,{crc},\"{data}\"]}}]\n").into_bytes();
+
+    let Ok(_) = tx.send(msg) else {
+        return "Failed to send to tx";
+    };
+
+    "Ok"
+}
+
 async fn iot_update(Path(path): Path<String>, State(tx): State<Sender<Vec<u8>>>) -> &'static str {
     let Ok((mut file, file_len)) = get_file(&path) else {
         return "Failed to open file";
     };
 
-    let msg = format!("[\"123\",{{\"k\":14,\"v\":[{file_len}]}}]\r\n").into_bytes();
+    let msg = format!("[\"123\",{{\"k\":14,\"v\":[{file_len}]}}]\n").into_bytes();
 
     let Ok(_) = tx.send(msg) else {
         return "Failed to send to tx";
@@ -77,7 +98,7 @@ async fn iot_update(Path(path): Path<String>, State(tx): State<Sender<Vec<u8>>>)
 
     sleep(Duration::from_millis(1_000)).await;
 
-    for i in 0..encoded_data.len() - 1 {
+    for i in 0..encoded_data.len() {
         match encoded_data.pop_front() {
             Some(data) => {
                 let mut crc = CRCu16::crc16xmodem();
@@ -90,7 +111,7 @@ async fn iot_update(Path(path): Path<String>, State(tx): State<Sender<Vec<u8>>>)
 
                 let offset = i * MAX_SIZE;
 
-                let msg = format!("[\"123\",{{\"k\":13,\"v\":[{offset},{crc},\"{data}\"]}}]\r\n")
+                let msg = format!("[\"123\",{{\"k\":13,\"v\":[{offset},{crc},\"{data}\"]}}]\n")
                     .into_bytes();
 
                 println!("{}", msg.len());
@@ -129,7 +150,13 @@ async fn mke_update(Path(path): Path<String>, State(tx): State<Sender<Vec<u8>>>)
         }
     }
 
-    for i in 0..encoded_data.len() - 1 {
+    let file_crc = file_crc.to_string();
+    let file_crc = file_crc.trim_start_matches("0x");
+    let Ok(file_crc) = u64::from_str_radix(file_crc, 16) else {
+        return "Failed to parse hex crc number";
+    };
+
+    for i in 0..encoded_data.len() {
         match encoded_data.pop_front() {
             Some(data) => {
                 let mut crc = CRCu16::crc16xmodem();
@@ -141,6 +168,8 @@ async fn mke_update(Path(path): Path<String>, State(tx): State<Sender<Vec<u8>>>)
                 };
                 let offset = i * MAX_SIZE;
 
+                println!("data len: {}", data.chars().count());
+
                 let msg = format!("[\"123\",{{\"k\":12,\"v\":[{offset},{crc},\"{data}\"]}}]\n")
                     .into_bytes();
 
@@ -150,13 +179,13 @@ async fn mke_update(Path(path): Path<String>, State(tx): State<Sender<Vec<u8>>>)
                     return "Failed to send to tx";
                 };
 
-                sleep(Duration::from_millis(500)).await;
+                sleep(Duration::from_millis(1_000)).await;
             }
             None => {}
         };
     }
 
-    let msg = format!("[\"1234\",{{\"k\":11,\"v\":[true,{file_len},{file_crc}]}}]").into_bytes();
+    let msg = format!("[\"1234\",{{\"k\":11,\"v\":[true,{file_len},{file_crc}]}}]\n").into_bytes();
 
     let Ok(_) = tx.send(msg) else {
         return "Failed o sendo to tx";
@@ -179,7 +208,7 @@ fn serial_connect(serial_port: &str, baud_rate: u32) -> Box<dyn serialport::Seri
             .timeout(Duration::from_millis(10))
             .open()
         else {
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(700));
             continue;
         };
 
@@ -238,7 +267,7 @@ fn serial_task(sender: Sender<Vec<u8>>, receiver: Receiver<Vec<u8>>) -> ! {
                     Err(_) => {}
                 };
 
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(150));
             }
         }
     }
